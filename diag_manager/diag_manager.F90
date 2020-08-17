@@ -17,6 +17,120 @@
 !* License along with FMS.  If not, see <http://www.gnu.org/licenses/>.
 !***********************************************************************
 
+!> @file 
+!! @brief diag_manager_mod is a set of simple calls for parallel diagnostics
+!!   on distributed systems. It is geared toward the writing of data in netCDF
+!!   format.
+!! @author Matt Harrison, Giang Nong, Seth Underwood
+!! @email gfdl.climate.model.info@noaa.gov
+!!
+!!   <TT>diag_manager_mod</TT> provides a convenient set of interfaces for
+!!   writing data to disk.  It is built upon the parallel I/O interface of FMS
+!!   code <TT>/shared/mpp/mpp_io.F90</TT>.
+!!
+!!   A single group of calls to the <TT>diag_manager_mod</TT> interfaces
+!!   provides data to disk at any number of sampling and/or averaging intervals
+!!   specified at run-time. Run-time specification of diagnostics are input
+!!   through the diagnostics table.
+!!
+!!   <H4>Usage</H4>
+!!   Use of <TT>diag_manager</TT> includes the following steps:
+!!   <OL>
+!!     <LI> Create diag_table as described in the
+!!          <LINK SRC="diag_table.html">diag_table.F90</LINK>
+!!          documentation.</LI>
+!!     <LI> Call <LINK SRC="#diag_manager_init"><TT>diag_manager_init</TT></LINK> to initialize
+!!          diag_manager_mod.</LI>
+!!     <LI> Call <LINK SRC="#register_diag_field"><TT>register_diag_field</TT></LINK> to register the field to be
+!!          output.
+!!          <B>NOTE:</B> ALL fields in diag_table should be registered <I>BEFORE</I>
+!!          the first send_data call</LI>
+!!     <LI> Call <LINK SRC="#send_data"><TT>send_data</TT></LINK> to send data to output fields </LI>
+!!     <LI> Call <LINK SRC="#diag_manager_end"><TT>diag_manager_end</TT></LINK> to exit diag_manager </LI>
+!!   </OL>
+!!
+!!   <H4>Features</H4>
+!!   Features of <TT>diag_manager_mod</TT>:
+!!   <OL>
+!!     <LI> Ability to output from 0D arrays (scalars) to 3D arrays.</LI>
+!!     <LI> Ability to output time average of fields that have time dependent
+!!          mask.</LI>
+!!     <LI> Give optional warning if <TT>register_diag_field</TT> fails due to
+!!          misspelled module name or field name.</LI>
+!!     <LI> Check if a field is registered twice.</LI>
+!!     <LI> Check for duplicate lines in diag_table. </LI>
+!!     <LI> <LINK SRC="diag_table.html">diag_table</LINK> can contain fields
+!!          that are NOT written to any files. The file name in diag_table of
+!!          these fields is <TT>null</TT>.</LI>
+!!     <LI> By default, a field is output in its global grid.  The user can now
+!!          output a field in a specified region.  See
+!!          <LINK SRC="#send_data"><TT>send_data</TT></LINK> for more details.</LI>
+!!     <LI> To check if the diag table is set up correctly, user should set
+!!          <TT>debug_diag_manager=.true.</TT> in diag_manager namelist, then
+!!          the the content of diag_table is printed in stdout.</LI>
+!!     <LI> New optional format of file information in <LINK SRC="diag_table.html">diag_table</LINK>.It is possible to have just
+!!           one file name and reuse it many times. A time string will be appended to the base file name each time a new file is
+!!          opened. The time string can be any combination from year to second of current model time.
+!!
+!!          Here is an example file line: <BR />
+!!          <PRE>"file2_yr_dy%1yr%3dy",2,"hours",1,"hours","Time", 10, "days", "1 1 7 0 0 0", 6, "hours"</PRE>
+!!          <BR />
+!!
+!!          From left to right we have:
+!!          <UL>
+!!            <LI>file name</LI>
+!!            <LI>output frequency</LI>
+!!            <LI>output frequency unit</LI>
+!!            <LI>Format (should always be 1)</LI>
+!!            <LI>time axis unit</LI>
+!!            <LI>time axis name</LI>
+!!            <LI>frequency for creating new file</LI>
+!!            <LI>unit for creating new file</LI>
+!!            <LI>start time of the new file</LI>
+!!            <LI>file duration</LI>
+!!            <LI>file duration unit.</LI>
+!!          </UL>
+!!          The 'file duration', if absent, will be equal to frequency for creating a new file.
+!!
+!!          Thus, the above means: create a new file every 10 days, each file will last 6 hours from creation time, no files will
+!!          be created before time "1 1 7 0 0 0".
+!!
+!!          In this example the string
+!!          <TT>10, "days", "1 1 7 0 0 0", 6, "hours"</TT> is optional.
+!!
+!!          Keywords for the time string suffix is
+!!          <TT>%xyr,%xmo,%xdy,%xhr,%xmi,%xsc</TT> where <TT>x</TT> is a
+!!          mandatory 1 digit number specifying the width of field used in
+!!          writing the string</LI>
+!!     <LI> New time axis for time averaged fields.  Users can use a namelist option to handle the time value written
+!!          to time axis for time averaged fields.
+!!
+!!          If <TT>mix_snapshot_average_fields=.true.</TT> then a time averaged file will have time values corresponding to
+!!          ending time_bound e.g. January monthly average is labeled Feb01. Users can have both snapshot and averaged fields in
+!!          one file.
+!!
+!!          If <TT>mix_snapshot_average_fields=.false.</TT> The time value written to time axis for time averaged fields is the
+!!          middle on the averaging time. For example, January monthly mean will be written at Jan 16 not Feb 01 as
+!!          before. However, to use this new feature users should <B>separate</B> snapshot fields and time averaged fields in
+!!          <B>different</B> files or a fatal error will occur.
+!!
+!!          The namelist <B>default</B> value is <TT>mix_snapshot_average_fields=.false.</TT></LI>
+!!     <LI> Time average, Root Mean Square, Max and Min, and diurnal. In addition to time average users can also get then Root Mean Square, Max or Min value
+!!          during the same interval of time as time average. For this purpose, in the diag table users must replace
+!!          <TT>.true.</TT> or <TT>.false.</TT> by "<TT>rms</TT>, <TT>max</TT>" or "<TT>min</TT>".  <B><I>Note:</I></B> Currently, max
+!!          and min are not available for regional output.
+!!
+!!          A diurnal average or the average of an integer power can also be requested using <TT>diurnal##</TT> or <TT>pow##</TT> where
+!!          <TT>##</TT> are the number of diurnal sections or integer power to average.</LI>
+!!     <LI> <TT>standard_name</TT> is added as optional argument in <LINK SRC="#register_diag_field"><TT>register_diag_field</TT>
+!!          </LINK>.</LI>
+!!     <LI>When namelist variable <TT>debug_diag_manager = .true.</TT> array
+!!         bounds are checked in <LINK SRC="#send_data"><TT>send_data</TT></LINK>.</LI>
+!!     <LI>Coordinate attributes can be written in the output file if the
+!!         argument "<TT>aux</TT>" is given in <LINK SRC="diag_axis.html#diag_axis_init"><TT>diag_axis_init</TT></LINK>. The
+!!         corresponding fields (geolat/geolon) should also be written to the
+!!         same file.</LI>
+!!   </OL>
 MODULE diag_manager_mod
 use platform_mod
   ! <CONTACT EMAIL="Matthew.Harrison@gfdl.noaa.gov">
@@ -354,6 +468,7 @@ use platform_mod
   !   <IN NAME="ke_in" TYPE="INTEGER, OPTIONAL"></IN>
   !   <IN NAME="weight" TYPE="REAL, OPTIONAL"></IN>
   !   <OUT NAME="err_msg" TYPE="CHARACTER(len=*), OPTIONAL"></OUT>
+  !> @brief Send data over to output fields.
   INTERFACE send_data
      MODULE PROCEDURE send_data_0d
      MODULE PROCEDURE send_data_1d
@@ -405,6 +520,7 @@ use platform_mod
   !    <IN NAME="area" TYPE="INTEGER, OPTIONAL" />
   !    <IN NAME="volume" TYPE="INTEGER, OPTIONAL" />
   !    <IN NAME="realm" TYPE="CHARACTER(len=*), OPTIONAL" />
+  !> @brief Register Diagnostic Field.
   INTERFACE register_diag_field
      MODULE PROCEDURE register_diag_field_scalar
      MODULE PROCEDURE register_diag_field_array
@@ -431,6 +547,7 @@ use platform_mod
   !    <IN NAME="area" TYPE="REAL" DIM="(:,:,:)" />
   !    <IN NAME="time" TYPE="TYPE(time_type)" DIM="(:,:,:)" />
   !    <IN NAME="mask" TYPE="LOGICAL" DIM="(:,:,:)" />
+  !> @brief Send tile-averaged data over to output fields.
   INTERFACE send_tile_averaged_data
      MODULE PROCEDURE send_tile_averaged_data1d
      MODULE PROCEDURE send_tile_averaged_data2d
@@ -457,6 +574,7 @@ use platform_mod
   !   <IN NAME="diag_field_id" TYPE="INTEGER" />
   !   <IN NAME="att_name" TYPE="CHARACTER(len=*)" />
   !   <IN NAME="att_value" TYPE="REAL|INTEGER|CHARACTER(len=*)" />
+  !> @brief Add a attribute to the output field
   INTERFACE diag_field_add_attribute
      MODULE PROCEDURE diag_field_add_attribute_scalar_r
      MODULE PROCEDURE diag_field_add_attribute_scalar_i
@@ -484,6 +602,7 @@ CONTAINS
   !   <IN NAME="volume" TYPE="INTEGER, OPTIONAL" />
   !   <IN NAME="realm" TYPE="CHARACTER(len=*), OPTIONAL" />
   !   <OUT NAME="err_msg" TYPE="CHARACTER(len=*), OPTIONAL" />
+  !> @return integer
   INTEGER FUNCTION register_diag_field_scalar(module_name, field_name, init_time, &
        & long_name, units, missing_value, range, standard_name, do_not_log, err_msg,&
        & area, volume, realm)
@@ -492,7 +611,7 @@ CONTAINS
     CHARACTER(len=*), OPTIONAL, INTENT(in) :: long_name, units, standard_name
     REAL, OPTIONAL, INTENT(in) :: missing_value
     REAL,  DIMENSION(2), OPTIONAL, INTENT(in) :: RANGE
-    LOGICAL, OPTIONAL, INTENT(in) :: do_not_log ! if TRUE, field information is not logged
+    LOGICAL, OPTIONAL, INTENT(in) :: do_not_log !< if TRUE, field information is not logged
     CHARACTER(len=*), OPTIONAL, INTENT(out):: err_msg
     INTEGER, OPTIONAL, INTENT(in) :: area, volume
     CHARACTER(len=*), OPTIONAL, INTENT(in):: realm !< String to set as the value to the modeling_realm attribute
@@ -533,6 +652,7 @@ CONTAINS
   !   <IN NAME="volume" TYPE="INTEGER, OPTIONAL">diag_field_id containing the cell volume field</IN>
   !   <IN NAME="realm" TYPE="CHARACTER(len=*), OPTIONAL" />
   !   <OUT NAME="err_msg" TYPE="CHARACTER(len=*), OPTIONAL" />
+  !> @return integer
   INTEGER FUNCTION register_diag_field_array(module_name, field_name, axes, init_time, &
        & long_name, units, missing_value, range, mask_variant, standard_name, verbose,&
        & do_not_log, err_msg, interp_method, tile_count, area, volume, realm)
@@ -542,11 +662,15 @@ CONTAINS
     CHARACTER(len=*), OPTIONAL, INTENT(in) :: long_name, units, standard_name
     REAL, OPTIONAL, INTENT(in) :: missing_value, RANGE(2)
     LOGICAL, OPTIONAL, INTENT(in) :: mask_variant,verbose
-    LOGICAL, OPTIONAL, INTENT(in) :: do_not_log ! if TRUE, field info is not logged
+    LOGICAL, OPTIONAL, INTENT(in) :: do_not_log !< if TRUE, field info is not logged
     CHARACTER(len=*), OPTIONAL, INTENT(out):: err_msg
-    CHARACTER(len=*), OPTIONAL, INTENT(in) :: interp_method
+    CHARACTER(len=*), OPTIONAL, INTENT(in) :: interp_method !< The interp method to be used when 
+                                                            !! regridding the field in post-processing.
+                                                            !! Valid options are "conserve_order1", 
+                                                            !! "conserve_order2", and "none".
     INTEGER, OPTIONAL, INTENT(in) :: tile_count
-    INTEGER, OPTIONAL, INTENT(in) :: area, volume
+    INTEGER, OPTIONAL, INTENT(in) :: area !< diag_field_id containing the cell area field
+    INTEGER, OPTIONAL, INTENT(in) :: volume !< diag_field_id containing the cell volume field
     CHARACTER(len=*), OPTIONAL, INTENT(in):: realm !< String to set as the value to the modeling_realm attribute
 
     INTEGER :: field, j, ind, file_num, freq
@@ -747,6 +871,8 @@ CONTAINS
   !   <IN NAME="area" TYPE="INTEGER, OPTIONAL">Field ID for the area field associated with this field</IN>
   !   <IN NAME="volume" TYPE="INTEGER, OPTIONAL">Field ID for the volume field associated with this field</IN>
   !   <IN NAME="realm" TYPE="CHARACTER(len=*), OPTIONAL" />
+  !> @brief Return field index for subsequent call to send_data.
+  !! @return Return (integer) field index for subsequent call to send_data.
   INTEGER FUNCTION register_static_field(module_name, field_name, axes, long_name, units,&
        & missing_value, range, mask_variant, standard_name, DYNAMIC, do_not_log, interp_method,&
        & tile_count, area, volume, realm)
@@ -757,9 +883,14 @@ CONTAINS
     REAL, DIMENSION(2), OPTIONAL, INTENT(in) :: range
     LOGICAL, OPTIONAL, INTENT(in) :: mask_variant
     LOGICAL, OPTIONAL, INTENT(in) :: DYNAMIC
-    LOGICAL, OPTIONAL, INTENT(in) :: do_not_log ! if TRUE, field information is not logged
-    CHARACTER(len=*), OPTIONAL, INTENT(in) :: interp_method
-    INTEGER,          OPTIONAL, INTENT(in) :: tile_count, area, volume
+    LOGICAL, OPTIONAL, INTENT(in) :: do_not_log !< if TRUE, field information is not logged
+    CHARACTER(len=*), OPTIONAL, INTENT(in) :: interp_method !< The interp method to be used when 
+                                                            !! regridding the field in post-processing.
+                                                            !! Valid options are "conserve_order1",
+                                                            !! "conserve_order2", and "none".
+    INTEGER,          OPTIONAL, INTENT(in) :: tile_count
+    INTEGER,          OPTIONAL, INTENT(in) :: area !< Field ID for the area field associated with this field
+    INTEGER,          OPTIONAL, INTENT(in) :: volume !< Field ID for the volume field associated with this field
     CHARACTER(len=*), OPTIONAL, INTENT(in) :: realm !< String to set as the value to the modeling_realm attribute
 
     REAL :: missing_value_use
@@ -1210,8 +1341,13 @@ CONTAINS
   !  </DESCRIPTION>
   !  <IN NAME="module_name" TYPE="CHARACTER(len=*)">Module name that registered the variable</IN>
   !  <IN NAME="field_name" TYPE="CHARACTER(len=*)">Variable name</IN>
+  !> @brief Return the diagnostic field ID of a given variable.
+  !! @return get_diag_field_id will return the ID returned during the register_diag_field call.
+  !!   If the variable is not in the diag_table, then the value "DIAG_FIELD_NOT_FOUND" will be
+  !!   returned.
   INTEGER FUNCTION get_diag_field_id(module_name, field_name)
-    CHARACTER(len=*), INTENT(in) :: module_name, field_name
+    CHARACTER(len=*), INTENT(in) :: module_name !< Module name that registered the variable
+    CHARACTER(len=*), INTENT(in) :: field_name !< Variable name
 
     ! find_input_field will return DIAG_FIELD_NOT_FOUND if the field is not
     ! included in the diag_table
@@ -1233,10 +1369,13 @@ CONTAINS
   !   <IN NAME="rel_field" TYPE="TYPE(output_field_type)">Output field that field must correspond to</IN>
   !   <OUT NAME="out_field_id" TYPE="INTEGER">output_field index of related output field</OUT>
   !   <OUT NAME="out_file_id" TYPE="INTEGER">file index of the out_field_id output field</OUT>
+  !> @brief Finds the corresponding related output field and file for a given input field
+  !! @return Logical get_related_field
   LOGICAL FUNCTION get_related_field(field, rel_field, out_field_id, out_file_id)
-    INTEGER, INTENT(in) :: field
-    TYPE(output_field_type), INTENT(in) :: rel_field
-    INTEGER, INTENT(out) :: out_field_id, out_file_id
+    INTEGER, INTENT(in) :: field !< input field ID to find the corresponding
+    TYPE(output_field_type), INTENT(in) :: rel_field !< Output field that field must correspond to
+    INTEGER, INTENT(out) :: out_field_id !< output_field index of related output field
+    INTEGER, INTENT(out) :: out_file_id !< file index of the out_field_id output field
 
     INTEGER :: i, cm_ind, cm_file_num
     INTEGER :: rel_file
@@ -1306,9 +1445,11 @@ CONTAINS
   !   <IN NAME="area" TYPE="INTEGER, OPTIONAL">Field ID for area</IN>
   !   <IN NAME="volume" TYPE="INTEGER, OPTIONAL">Field ID for volume</IN>
   !   <OUT NAME="err_msg" TYPE="CHARACTER(len=*), OPTIONAL"> </OUT>
+  !> @brief If needed, add cell_measures and associated_file attribute to out field/file
   SUBROUTINE init_field_cell_measures(output_field, area, volume, err_msg)
-    TYPE(output_field_type), INTENT(inout) :: output_field
-    INTEGER, INTENT(in), OPTIONAL :: area, volume
+    TYPE(output_field_type), INTENT(inout) :: output_field !< Output field that needs the cell_measures
+    INTEGER, INTENT(in), OPTIONAL :: area !< Field ID for area
+    INTEGER, INTENT(in), OPTIONAL :: volume !< Field ID for volume
     CHARACTER(len=*), INTENT(out), OPTIONAL :: err_msg
 
     INTEGER :: cm_ind, cm_file_num, file_num
@@ -1443,6 +1584,7 @@ CONTAINS
   !   <IN NAME="ke_in" TYPE="Not Applicable"></IN>
   !   <IN NAME="weight" TYPE="Not Applicable"></IN>
   !   <OUT NAME="err_msg" TYPE="CHARACTER(len=*), OPTIONAL"></OUT>
+  !> @return Logical send_data_0d
   LOGICAL FUNCTION send_data_0d(diag_field_id, field, time, err_msg)
     INTEGER, INTENT(in) :: diag_field_id
     REAL, INTENT(in) :: field
@@ -1476,6 +1618,7 @@ CONTAINS
   !   <IN NAME="ke_in" TYPE="Not Applicable"></IN>
   !   <IN NAME="weight" TYPE="REAL, OPTIONAL"></IN>
   !   <OUT NAME="err_msg" TYPE="CHARACTER(len=*), OPTIONAL"></OUT>
+  !> @return Logical send_data_1d
   LOGICAL FUNCTION send_data_1d(diag_field_id, field, time, is_in, mask, rmask, ie_in, weight, err_msg)
     INTEGER, INTENT(in) :: diag_field_id
     REAL, DIMENSION(:), INTENT(in) :: field
@@ -1539,6 +1682,7 @@ CONTAINS
   !   <IN NAME="ke_in" TYPE="Not Applicable"></IN>
   !   <IN NAME="weight" TYPE="REAL, OPTIONAL"></IN>
   !   <OUT NAME="err_msg" TYPE="CHARACTER(len=*), OPTIONAL"></OUT>
+  !> @return Logical send_data_2d
   LOGICAL FUNCTION send_data_2d(diag_field_id, field, time, is_in, js_in, &
        & mask, rmask, ie_in, je_in, weight, err_msg)
     INTEGER, INTENT(in) :: diag_field_id
@@ -1680,6 +1824,7 @@ CONTAINS
   !   <IN NAME="ke_in" TYPE="INTEGER, OPTIONAL"></IN>
   !   <IN NAME="weight" TYPE="REAL, OPTIONAL"></IN>
   !   <OUT NAME="err_msg" TYPE="CHARACTER(len=*), OPTIONAL"></OUT>
+  !> @return Logical send_data_3d
   LOGICAL FUNCTION send_data_3d(diag_field_id, field, time, is_in, js_in, ks_in, &
              & mask, rmask, ie_in, je_in, ke_in, weight, err_msg)
     INTEGER, INTENT(in) :: diag_field_id
@@ -1697,10 +1842,16 @@ CONTAINS
     INTEGER :: ksr, ker
     INTEGER :: i, out_num, file_num, n1, n2, n3, number_of_outputs, ii,f1,f2,f3,f4
     INTEGER :: freq, units, is, js, ks, ie, je, ke, i1, j1,k1, j, k
-    INTEGER, DIMENSION(3) :: l_start, l_end ! local start and end indices on 3 axes for regional output
-    INTEGER   :: hi, hj, twohi, twohj  ! halo size in x and y direction
-    INTEGER :: sample ! index along the diurnal time axis
-    INTEGER :: day,second,tick ! components of the current date
+    INTEGER, DIMENSION(3) :: l_start !< local start indices on 3 axes for regional output
+    INTEGER, DIMENSION(3) :: l_end !< local end indices on 3 axes for regional output
+    INTEGER   :: hi !< halo size in x direction
+    INTEGER   :: hj !< halo size in y direction
+    INTEGER   :: twohi !< halo size in x direction
+    INTEGER   :: twohj !< halo size in y direction
+    INTEGER :: sample !< index along the diurnal time axis
+    INTEGER :: day !< components of the current date
+    INTEGER :: second !< components of the current date
+    INTEGER :: tick !< components of the current date
     INTEGER :: status
     INTEGER :: numthreads
     INTEGER :: active_omp_level
@@ -3202,12 +3353,13 @@ CONTAINS
   !   <IN NAME="area" TYPE="REAL, DIMENSION(:,:,:)">  </IN>
   !   <IN NAME="time" TYPE="TYPE(time_type)">  </IN>
   !   <IN NAME="mask" TYPE="LOGICAL, DIMENSION(:,:,:), OPTIONAL"></IN>
+  !> @return Logical send_tile_averaged_data1d
   LOGICAL FUNCTION send_tile_averaged_data1d ( id, field, area, time, mask )
-    INTEGER, INTENT(in) :: id  ! id od the diagnostic field
-    REAL, INTENT(in) :: field(:,:) ! field to average and send
-    REAL, INTENT(in) :: area (:,:) ! area of tiles (== averaging weights), arbitrary units
-    TYPE(time_type), INTENT(in)  :: time ! current time
-    LOGICAL, INTENT(in),OPTIONAL :: mask (:,:) ! land mask
+    INTEGER, INTENT(in) :: id  !< id od the diagnostic field
+    REAL, INTENT(in) :: field(:,:) !< field to average and send
+    REAL, INTENT(in) :: area (:,:) !< area of tiles (== averaging weights), arbitrary units
+    TYPE(time_type), INTENT(in)  :: time !< current time
+    LOGICAL, INTENT(in),OPTIONAL :: mask (:,:) !< land mask
 
     REAL, DIMENSION(SIZE(field,1)) :: out(SIZE(field,1))
 
@@ -3236,13 +3388,13 @@ CONTAINS
   !   <OUT NAME="out" TYPE="REAL, DIMENSION(:,:)">(ug_index) result of averaging</OUT>
   SUBROUTINE average_tiles1d(diag_field_id, x, area, mask, out)
     INTEGER, INTENT(in) :: diag_field_id
-    REAL, DIMENSION(:,:), INTENT(in) :: x
-    REAL, DIMENSION(:,:), INTENT(in) :: area
-    LOGICAL, DIMENSION(:,:), INTENT(in) :: mask
-    REAL, DIMENSION(:), INTENT(out) :: out
+    REAL, DIMENSION(:,:), INTENT(in) :: x !< (ug_index, tile) field to average
+    REAL, DIMENSION(:,:), INTENT(in) :: area !< (ug_index, tile) fractional area
+    LOGICAL, DIMENSION(:,:), INTENT(in) :: mask !< (ug_index, tile) land mask
+    REAL, DIMENSION(:), INTENT(out) :: out !< (ug_index) result of averaging
 
-    INTEGER  :: it ! iterator over tile number
-    REAL, DIMENSION(SIZE(x,1)) :: s ! area accumulator
+    INTEGER  :: it !< iterator over tile number
+    REAL, DIMENSION(SIZE(x,1)) :: s !< area accumulator
     REAL :: local_missing_value
 
     ! # FATAL if diag_field_id is less than 0, indicates field was not in diag_table.
@@ -3287,12 +3439,13 @@ CONTAINS
   !   <IN NAME="area" TYPE="REAL, DIMENSION(:,:,:)">  </IN>
   !   <IN NAME="time" TYPE="TYPE(time_type)">  </IN>
   !   <IN NAME="mask" TYPE="LOGICAL, DIMENSION(:,:,:), OPTIONAL"></IN>
+  !> @return Logical send_tile_averaged_data2d
   LOGICAL FUNCTION send_tile_averaged_data2d ( id, field, area, time, mask )
-    INTEGER, INTENT(in) :: id  ! id od the diagnostic field
-    REAL, INTENT(in) :: field(:,:,:) ! field to average and send
-    REAL, INTENT(in) :: area (:,:,:) ! area of tiles (== averaging weights), arbitrary units
-    TYPE(time_type), INTENT(in)  :: time ! current time
-    LOGICAL, INTENT(in),OPTIONAL :: mask (:,:,:) ! land mask
+    INTEGER, INTENT(in) :: id  !< id od the diagnostic field
+    REAL, INTENT(in) :: field(:,:,:) !< field to average and send
+    REAL, INTENT(in) :: area (:,:,:) !< area of tiles (== averaging weights), arbitrary units
+    TYPE(time_type), INTENT(in)  :: time !< current time
+    LOGICAL, INTENT(in),OPTIONAL :: mask (:,:,:) !< land mask
 
     REAL, DIMENSION(SIZE(field,1),SIZE(field,2)) :: out(SIZE(field,1), SIZE(field,2))
 
@@ -3313,12 +3466,13 @@ CONTAINS
   !   <IN NAME="area" TYPE="REAL, DIMENSION(:,:,:)"></IN>
   !   <IN NAME="time" TYPE="TYPE(time_type)"></IN>
   !   <IN NAME="mask" TYPE="LOGICAL, DIMENSION(:,:,:), OPTIONAL">  </IN>
+  !> @return Logical send_tile_averaged_data3d
   LOGICAL FUNCTION send_tile_averaged_data3d( id, field, area, time, mask )
-    INTEGER, INTENT(in) :: id ! id of the diagnostic field
-    REAL, DIMENSION(:,:,:,:), INTENT(in) :: field ! (lon, lat, tile, lev) field to average and send
-    REAL, DIMENSION(:,:,:), INTENT(in) :: area (:,:,:) ! (lon, lat, tile) tile areas ( == averaging weights), arbitrary units
-    TYPE(time_type), INTENT(in)  :: time ! current time
-    LOGICAL, DIMENSION(:,:,:), INTENT(in), OPTIONAL :: mask ! (lon, lat, tile) land mask
+    INTEGER, INTENT(in) :: id !< id of the diagnostic field
+    REAL, DIMENSION(:,:,:,:), INTENT(in) :: field !< (lon, lat, tile, lev) field to average and send
+    REAL, DIMENSION(:,:,:), INTENT(in) :: area (:,:,:) !< (lon, lat, tile) tile areas ( == averaging weights), arbitrary units
+    TYPE(time_type), INTENT(in)  :: time !< current time
+    LOGICAL, DIMENSION(:,:,:), INTENT(in), OPTIONAL :: mask !< (lon, lat, tile) land mask
 
     REAL, DIMENSION(SIZE(field,1),SIZE(field,2),SIZE(field,4)) :: out
     LOGICAL, DIMENSION(SIZE(field,1),SIZE(field,2),SIZE(field,4)) :: mask3
@@ -3358,13 +3512,13 @@ CONTAINS
   !   <OUT NAME="out" TYPE="REAL, DIMENSION(:,:)">(lon, lat) result of averaging</OUT>
   SUBROUTINE average_tiles(diag_field_id, x, area, mask, out)
     INTEGER, INTENT(in) :: diag_field_id
-    REAL, DIMENSION(:,:,:), INTENT(in) :: x
-    REAL, DIMENSION(:,:,:), INTENT(in) :: area
-    LOGICAL, DIMENSION(:,:,:), INTENT(in) :: mask
-    REAL, DIMENSION(:,:), INTENT(out) :: out
+    REAL, DIMENSION(:,:,:), INTENT(in) :: x !< (lon, lat, tile) field to average
+    REAL, DIMENSION(:,:,:), INTENT(in) :: area !< (lon, lat, tile) fractional area
+    LOGICAL, DIMENSION(:,:,:), INTENT(in) :: mask !< (lon, lat, tile) land mask
+    REAL, DIMENSION(:,:), INTENT(out) :: out !< (lon, lat) result of averaging
 
-    INTEGER  :: it ! iterator over tile number
-    REAL, DIMENSION(SIZE(x,1),SIZE(x,2)) :: s ! area accumulator
+    INTEGER  :: it !< iterator over tile number
+    REAL, DIMENSION(SIZE(x,1),SIZE(x,2)) :: s !< area accumulator
     REAL :: local_missing_value
 
     ! # FATAL if diag_field_id is less than 0, indicates field was not in diag_table.
@@ -3403,6 +3557,7 @@ CONTAINS
   END SUBROUTINE average_tiles
   ! </SUBROUTINE>
 
+  !> @return Integer writing_field
   INTEGER FUNCTION writing_field(out_num, at_diag_end, error_string, time)
     INTEGER, INTENT(in) :: out_num
     LOGICAL, INTENT(in) :: at_diag_end
@@ -3413,7 +3568,7 @@ CONTAINS
     LOGICAL :: time_max, time_min, reduced_k_range, missvalue_present
     LOGICAL :: average, time_rms, need_compute, phys_window
     INTEGER :: in_num, file_num, freq, units
-    INTEGER :: b1,b2,b3,b4 ! size of buffer along x,y,z,and diurnal axes
+    INTEGER :: b1,b2,b3,b4 !< size of buffer along x,y,z,and diurnal axes
     INTEGER :: i, j, k, m
     REAL    :: missvalue, num
     real,allocatable,dimension(:,:,:,:) :: diurnal_buffer
@@ -3686,6 +3841,8 @@ CONTAINS
   !     SUBROUTINE diag_manager_end(time)
   !   </TEMPLATE>
   !   <IN NAME="TIME" TYPE="time_type"></IN>
+  !> @brief Flushes diagnostic buffers where necessary. Close diagnostics files.
+  !!   A warning will be issued here if a field in diag_table is not registered
   SUBROUTINE diag_manager_end(time)
     TYPE(time_type), INTENT(in) :: time
 
@@ -3711,6 +3868,7 @@ CONTAINS
   !   </DESCRIPTION>
   !   <IN NAME="file" TYPE="INTEGER"></IN>
   !   <IN NAME="tile" TYPE="TYPE(time_type)"></IN>
+  !> @brief Replaces diag_manager_end; close just one file: files(file)
   SUBROUTINE closing_file(file, time)
     INTEGER, INTENT(in) :: file
     TYPE(time_type), INTENT(in) :: time
@@ -3814,9 +3972,11 @@ CONTAINS
   !   <IN NAME="diag_model_subset" TYPE="INTEGER, OPTIONAL"></IN>
   !   <IN NAME="time_init" TYPE="INTEGER, DIMENSION(6), OPTIONAL">Model time diag_manager initialized</IN>
   !   <OUT NAME="err_msg" TYPE="CHARACTER(len=*), OPTIONAL"></OUT>
+  !> @brief Initialize Diagnostics Manager.
+  !! @details Open and read diag_table. Select fields and files for diagnostic output.
   SUBROUTINE diag_manager_init(diag_model_subset, time_init, err_msg)
     INTEGER, OPTIONAL, INTENT(IN) :: diag_model_subset
-    INTEGER, DIMENSION(6), OPTIONAL, INTENT(IN) :: time_init
+    INTEGER, DIMENSION(6), OPTIONAL, INTENT(IN) :: time_init !< Model time diag_manager initialized
     CHARACTER(len=*), INTENT(out), OPTIONAL :: err_msg
 
     CHARACTER(len=*), PARAMETER :: SEP = '|'
@@ -4004,6 +4164,9 @@ CONTAINS
   !   <DESCRIPTION>
   !     Return base time for diagnostics (note: base time must be >= model time).
   !   </DESCRIPTION>
+  !> @brief Return base time for diagnostics.
+  !! @return time_type get_base_time
+  !! @details Return base time for diagnostics (note: base time must be >= model time).
   TYPE(time_type) FUNCTION get_base_time ()
     ! <ERROR STATUS="FATAL">
     !   MODULE has not been initialized
@@ -4030,6 +4193,8 @@ CONTAINS
   !   <OUT NAME="hour" TYPE="INTEGER"></OUT>
   !   <OUT NAME="minute" TYPE="INTEGER"></OUT>
   !   <OUT NAME="second" TYPE="INTEGER"></OUT>
+  !> @brief Return base date for diagnostics.
+  !! @details Return date information for diagnostic reference time.
   SUBROUTINE get_base_date(year, month, day, hour, minute, second)
     INTEGER, INTENT(out) :: year, month, day, hour, minute, second
 
@@ -4062,8 +4227,14 @@ CONTAINS
   !     next_model_time = current model time + model time_step
   !   </IN>
   !   <IN NAME="diag_field_id" TYPE="INTEGER"></IN>
+  !> @brief Determine whether data is needed for the current model time step.
+  !! @return Logical need_data
+  !! @details Determine whether data is needed for the current model time step.
+  !!     Since diagnostic data are buffered, the "next" model time is passed
+  !!     instead of the current model time. This call can be used to minimize
+  !!     overhead for complicated diagnostics.
   LOGICAL FUNCTION need_data(diag_field_id, next_model_time)
-    TYPE(time_type), INTENT(in) :: next_model_time
+    TYPE(time_type), INTENT(in) :: next_model_time !< next_model_time = current model time + model time_step
     INTEGER, INTENT(in) :: diag_field_id
 
     INTEGER :: i, out_num
@@ -4098,16 +4269,26 @@ CONTAINS
   !     The units are 'days since BASE_DATE', all diurnal axes belong to the set 'diurnal'
   !   </DESCRIPTION>
   !   <IN NAME="n_samples" TYPE="INTEGER">Number of intervals during the day</IN>
+  !> @brief Finds or initializes a diurnal time axis and returns its' ID.
+  !! @return Integer init_diurnal_axis
+  !! @details Given number of time intervals in the day, finds or initializes a diurnal time axis
+  !!     and returns its ID. It uses get_base_date, so should be in the file where it's accessible.
+  !!     The units are 'days since BASE_DATE', all diurnal axes belong to the set 'diurnal'
   INTEGER FUNCTION init_diurnal_axis(n_samples)
-    INTEGER, INTENT(in) :: n_samples ! number of intervals during the day
+    INTEGER, INTENT(in) :: n_samples !< number of intervals during the day
 
-    REAL :: DATA  (n_samples)   ! central points of time intervals
-    REAL :: edges (n_samples+1) ! boundaries of time intervals
-    INTEGER :: edges_id ! id of the corresponding edges
+    REAL :: DATA  (n_samples)   !< central points of time intervals
+    REAL :: edges (n_samples+1) !< boundaries of time intervals
+    INTEGER :: edges_id !< id of the corresponding edges
     INTEGER :: i
-    INTEGER :: year, month, day, hour, minute, second ! components of the base date
-    CHARACTER(32)  :: name  ! name of the axis
-    CHARACTER(128) :: units ! units of time
+    INTEGER :: year !< components of the base date
+    INTEGER :: month !< components of the base date
+    INTEGER :: day !< components of the base date
+    INTEGER :: hour !< components of the base date
+    INTEGER :: minute !< components of the base date
+    INTEGER :: second !< components of the base date
+    CHARACTER(32)  :: name  !< name of the axis
+    CHARACTER(128) :: units !< units of time
 
     CALL get_base_date(year, month, day, hour, minute, second)
     WRITE (units,11) 'hours', year, month, day, hour, minute, second
@@ -4380,9 +4561,14 @@ CONTAINS
   !   <IN NAME="diag_field_id" TYPE="INTEGER" />
   !   <IN NAME="area" TYPE="INTEGER, OPTIONAL" />
   !   <IN NAME="volume" TYPE="INTEGER, OPTIONAL" />
+  !> @brief Add the cell_measures attribute to a diag out field
+  !! @details Add the cell_measures attribute to a give diag field.  This is useful if the
+  !!     area/volume fields for the diagnostic field are defined in another module after
+  !!     the diag_field.
   SUBROUTINE diag_field_add_cell_measures(diag_field_id, area, volume)
     INTEGER, INTENT(in) :: diag_field_id
-    INTEGER, INTENT(in), OPTIONAL :: area, volume ! diag ids of area or volume
+    INTEGER, INTENT(in), OPTIONAL :: area !< diag ids of area
+    INTEGER, INTENT(in), OPTIONAL :: volume !< diag ids of volume
 
     integer :: j, ind
 
